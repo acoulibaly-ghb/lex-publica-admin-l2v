@@ -1,10 +1,12 @@
-
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Message } from '../types';
 import { SYSTEM_INSTRUCTION } from '../constants';
 import { decodeAudioData, playAudioBuffer } from '../utils/audio-utils';
 import { fileToBase64 } from '../utils/file-utils';
+
+// Clé API pour le TTS uniquement (côté client)
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 // --- Markdown Component Helper ---
 const parseBold = (text: string) => {
@@ -111,8 +113,6 @@ const TextChat: React.FC = () => {
   const audioQueueRef = useRef<string[]>([]);
   const isProcessingQueueRef = useRef(false);
 
-  const API_KEY = process.env.API_KEY;
-
   const suggestions = [
     "Qu'est-ce qu'un service public ?",
     "L'arrêt Benjamin et la police administrative",
@@ -167,8 +167,8 @@ const TextChat: React.FC = () => {
   };
 
   const generateAndPlayTTS = async (text: string) => {
-    if (!API_KEY) {
-        console.error("Clé API manquante");
+    if (!GEMINI_API_KEY) {
+        console.error("Clé API manquante pour TTS");
         return;
     }
     
@@ -176,7 +176,7 @@ const TextChat: React.FC = () => {
     if (!cleanText) return;
 
     try {
-        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash-preview-tts",
             contents: [{ parts: [{ text: cleanText }] }],
@@ -242,11 +242,6 @@ const TextChat: React.FC = () => {
   const sendMessage = async (text: string) => {
     // Allow sending if there is text OR an attachment
     if ((!text.trim() && !attachment) || isLoading) return;
-    
-    if (!API_KEY) {
-        setMessages(prev => [...prev, { role: 'model', text: "### Erreur de Configuration\n\nLa clé API est manquante. Veuillez configurer la variable d'environnement `API_KEY`.", timestamp: new Date() }]);
-        return;
-    }
 
     // Reset Audio
     if (audioContextRef.current) {
@@ -262,74 +257,53 @@ const TextChat: React.FC = () => {
     
     setMessages(prev => [...prev, userMsg]);
     setInput('');
-    const currentAttachment = attachment; // Capture current attachment
-    clearAttachment(); // Clear UI immediately
+    const currentAttachment = attachment;
+    clearAttachment();
     setIsLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: API_KEY });
+      // Préparer le contenu à envoyer
+      let messageContent = text.trim();
       
-      // Prepare contents with potential attachment
-      const parts: any[] = [];
+      // Si un fichier est attaché, on l'inclut dans le message
       if (currentAttachment) {
-        parts.push({
-          inlineData: {
-            mimeType: currentAttachment.file.type,
-            data: currentAttachment.base64
-          }
-        });
-      }
-      if (text.trim()) {
-        parts.push({ text: text });
-      } else if (currentAttachment) {
-        // If only file, add a default prompt
-        parts.push({ text: "Analyse ce document et résume-le." });
+        messageContent = `[Fichier ${currentAttachment.file.type}: ${currentAttachment.file.name}] ${messageContent}`;
+        // Note: Pour l'instant, on envoie juste le nom du fichier
+        // Pour une vraie analyse de fichier, il faudrait l'envoyer en base64
       }
 
-      const result = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
-        contents: [{ role: 'user', parts: parts }],
-        config: {
-            systemInstruction: SYSTEM_INSTRUCTION
-        }
+      // Appel à votre API serverless
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: messageContent,
+          coursContent: SYSTEM_INSTRUCTION // Vos cours
+        }),
       });
 
-      let fullText = '';
-      let sentenceBuffer = '';
-      
-      // Initialize model message
-      setMessages(prev => [...prev, { role: 'model', text: '', timestamp: new Date() }]);
-
-      for await (const chunk of result) {
-          const chunkText = chunk.text; 
-          if (chunkText) {
-            fullText += chunkText;
-            sentenceBuffer += chunkText;
-  
-            // Update UI progressively
-            setMessages(prev => {
-                const newArr = [...prev];
-                newArr[newArr.length - 1].text = fullText;
-                return newArr;
-            });
-  
-            // Check for sentence completion to queue TTS
-            const sentences = sentenceBuffer.match(/[^.?!]+[.?!]+(\s|$)/g);
-            if (sentences) {
-                sentences.forEach(sentence => {
-                    addToAudioQueue(sentence);
-                });
-                // Keep remainder in buffer
-                const lastMatch = sentences[sentences.length - 1];
-                const lastIndex = sentenceBuffer.lastIndexOf(lastMatch);
-                sentenceBuffer = sentenceBuffer.substring(lastIndex + lastMatch.length);
-            }
-          }
+      if (!response.ok) {
+        throw new Error('Erreur API');
       }
 
-      // Process any remaining text in buffer
-      if (sentenceBuffer.trim()) {
-          addToAudioQueue(sentenceBuffer);
+      const data = await response.json();
+      const fullText = data.response;
+
+      // Ajouter la réponse aux messages
+      setMessages(prev => [...prev, { 
+        role: 'model', 
+        text: fullText, 
+        timestamp: new Date() 
+      }]);
+
+      // Générer le TTS pour toute la réponse
+      const sentences = fullText.match(/[^.?!]+[.?!]+(\s|$)/g);
+      if (sentences) {
+        sentences.forEach(sentence => {
+          addToAudioQueue(sentence);
+        });
       }
 
       setIsLoading(false);
@@ -338,7 +312,7 @@ const TextChat: React.FC = () => {
       console.error(error);
       const errorMsg: Message = {
         role: 'model',
-        text: "### Erreur\n\nUne erreur est survenue lors du traitement.",
+        text: "### Erreur\n\nUne erreur est survenue lors du traitement. Veuillez réessayer.",
         timestamp: new Date()
       };
       setMessages(prev => [...prev, errorMsg]);
