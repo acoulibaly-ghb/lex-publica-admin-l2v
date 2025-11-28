@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { SYSTEM_INSTRUCTION } from '../constants';
 import { createPcmBlob, decodeAudioData } from '../utils/audio-utils';
 import Visualizer from './Visualizer';
